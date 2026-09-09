@@ -17,12 +17,14 @@ const (
 )
 
 const (
-	MsgVersion   = "version"
-	MsgPeers     = "peers"
-	MsgGetBlocks = "getblocks"
-	MsgBlocks    = "blocks"
-	MsgNewTx     = "newtx"
-	MsgNewBlock  = "newblock"
+	MsgVersion    = "version"
+	MsgPeers      = "peers"
+	MsgGetBlocks  = "getblocks"
+	MsgBlocks     = "blocks"
+	MsgNewTx      = "newtx"
+	MsgNewBlock   = "newblock"
+	MsgGetMempool = "getmempool"
+	MsgMempool    = "mempool"
 )
 
 type Envelope struct {
@@ -70,6 +72,16 @@ type NewTxMsg struct {
 
 type NewBlockMsg struct {
 	Block *chain.Block `json:"block"`
+}
+
+// GetMempoolMsg asks a peer for its current pending transactions. Sent once
+// on handshake so a freshly connected node sees txs that were gossiped before
+// it joined — flood gossip alone only reaches peers already connected at
+// broadcast time.
+type GetMempoolMsg struct{}
+
+type MempoolMsg struct {
+	Txs []*chain.Tx `json:"txs"`
 }
 
 func WriteFrame(w io.Writer, env *Envelope) error {

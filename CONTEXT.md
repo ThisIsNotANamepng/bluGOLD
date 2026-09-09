@@ -135,6 +135,18 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
   poll for themselves.
 - Dedup: `seenTx` map, reset wholesale past 50k entries.
 - Orphans: buffered keyed by PrevHash, cap 100, promoted recursively on parent arrival.
+- **Mempool sync on connect.** `onPeerConnect` sends `getmempool` right after
+  the initial `getblocks`. The peer replies `mempool` with its pending txs
+  (capped at `mempoolReplyBudget`, same reasoning as `syncTxBudget`), fed back
+  through `AddTx` on receipt. Without this, flood gossip alone means a node
+  that connects after a tx was broadcast never sees it until the next block —
+  no test caught this because every itest network was fully connected before
+  any tx was sent.
+- `n.hashrate` (set by `SetHashrateSource`, read by `Info()`) is guarded by
+  `n.mu` like every other field — it is set from `main()` shortly after
+  `node.New` returns, concurrently with the API server goroutine already
+  calling `Info()`. A plain field would race the moment a request lands
+  before `SetHashrateSource` runs (see Gotchas).
 
 ## P2P details (internal/p2p)
 
@@ -232,6 +244,15 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
     coexisted forever despite live connections. Fixed by block locators —
     `TestDivergedChainsConverge` and friends in `internal/itest` pin it.
     Fork choice is only as good as the branches a node manages to download.
+12. `n.hashrate` was a bare `func() uint64` field written by `SetHashrateSource`
+    from `main()` and read by `Info()` from the API's HTTP handler goroutine,
+    with no lock — a real data race, just one the existing tests never
+    triggered because nothing called `Info()` concurrently with node startup.
+    Fixed by moving both the write and the read under `n.mu`
+    (`TestLateJoinerSeesMempool` and the rest of the suite pass under
+    `-race`, but this specific race needed a targeted fix, not a test, since
+    reproducing a startup-ordering race reliably in a test is its own can of
+    worms).
 
 ## Known simplifications (documented, accepted)
 

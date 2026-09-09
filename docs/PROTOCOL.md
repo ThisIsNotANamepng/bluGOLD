@@ -158,6 +158,8 @@ own address are dropped (self-connection guard).
 | `blocks` | `{blocks: [Block]}` | responder |
 | `newtx` | `{tx}` | gossip |
 | `newblock` | `{block}` | gossip |
+| `getmempool` | `{}` | requester, once on connect |
+| `mempool` | `{txs: [Tx]}` | responder |
 
 ### Block locators
 
@@ -198,6 +200,22 @@ Flow:
 - Block/tx payloads are the same JSON encodings used for on-disk storage
 - Protocol version is 2; mismatched versions are disconnected. Version 1 used
   `getblocks {from, count}` and could not sync across a fork.
+
+### Mempool sync
+
+Flood gossip (`newtx`) only reaches peers that were already connected at
+broadcast time, so a node that connects (or reconnects) after a tx was
+gossiped would otherwise not see it until the next block confirms it.
+
+- On handshake, right after the initial `getblocks`, a node sends
+  `getmempool` (empty payload) to the new peer.
+- The peer answers `mempool` with its pending transactions, oldest-first,
+  capped at 5000 txs so the reply cannot approach the 8 MiB frame limit. A
+  mempool larger than that is not fully synced by this exchange; it still
+  reaches new peers eventually via `newtx` gossip and confirmed blocks.
+- Received txs are fed through the normal tx-acceptance path: dedup by hash,
+  validate against pending state, add to the mempool, and re-broadcast if
+  new. There is no separate mempool wire format.
 
 ## Local HTTP API
 

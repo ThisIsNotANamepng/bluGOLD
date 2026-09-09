@@ -33,6 +33,9 @@ const (
 	// frame limit, and WriteFrame's error is invisible to the requester: it
 	// would just keep asking and never receive an answer.
 	syncTxBudget = 5000
+	// mempoolReplyBudget caps a getmempool reply the same way: maxMempool
+	// (10k) full txs could otherwise approach the frame limit.
+	mempoolReplyBudget = 5000
 )
 
 type blockEntry struct {
@@ -171,7 +174,11 @@ func (n *Node) Params() chain.Params { return n.params }
 
 func (n *Node) Wallet() *crypto.Wallet { return n.wallet }
 
-func (n *Node) SetHashrateSource(f func() uint64) { n.hashrate = f }
+func (n *Node) SetHashrateSource(f func() uint64) {
+	n.mu.Lock()
+	n.hashrate = f
+	n.mu.Unlock()
+}
 
 // WalletAddress returns the node wallet's address, or "" if no wallet is loaded.
 func (n *Node) WalletAddress() crypto.Address {
@@ -785,6 +792,7 @@ func (n *Node) Info() Info {
 	}
 	balance := n.state.Account(n.WalletAddress()).Balance
 	mempool := len(n.mempoolTx)
+	hashrateFn := n.hashrate
 	n.mu.Unlock()
 
 	peers := 0
@@ -792,8 +800,8 @@ func (n *Node) Info() Info {
 		peers = n.sw.PeerCount()
 	}
 	var hashrate uint64
-	if n.hashrate != nil {
-		hashrate = n.hashrate()
+	if hashrateFn != nil {
+		hashrate = hashrateFn()
 	}
 	return Info{
 		Name:       "bluGOLD",
@@ -894,8 +902,16 @@ func (n *Node) publishLocked(tip *chain.Block) {
 // unconditionally: a peer's announced height says nothing about how much work
 // its chain carries, and two chains of the same height can be entirely
 // different. A peer with nothing to add simply answers with no blocks.
+//
+// It also asks for the peer's current mempool. Flood gossip only reaches
+// peers that were already connected when a tx was broadcast, so without this
+// a freshly connected (or reconnected) node would see no pending txs at all
+// until the next block confirms them.
 func (n *Node) onPeerConnect(p *p2p.Peer) {
 	n.sendGetBlocks(p, n.tipLocator())
+	if env, err := wire.NewEnvelope(wire.MsgGetMempool, wire.GetMempoolMsg{}); err == nil {
+		_ = p.Send(env)
+	}
 }
 
 // tipLocator returns a block locator for our current best chain.
@@ -956,6 +972,10 @@ func (n *Node) onMessage(p *p2p.Peer, env *wire.Envelope) {
 		n.onNewBlock(p, env)
 	case wire.MsgNewTx:
 		n.onNewTx(p, env)
+	case wire.MsgGetMempool:
+		n.onGetMempool(p, env)
+	case wire.MsgMempool:
+		n.onMempool(p, env)
 	}
 }
 
@@ -1091,6 +1111,49 @@ func (n *Node) onNewTx(p *p2p.Peer, env *wire.Envelope) {
 	}
 	if err := n.AddTx(msg.Tx, p.Dial); err != nil {
 		log.Printf("tx rejected: %v", err)
+	}
+}
+
+// onGetMempool answers with our current pending transactions, capped at
+// mempoolReplyBudget so the reply cannot approach the 8 MiB frame limit. A
+// requester only ever asks once per connection, so there is no batching
+// protocol here — a mempool larger than the cap is simply not fully synced,
+// which self-heals as those txs confirm or get re-gossiped.
+func (n *Node) onGetMempool(p *p2p.Peer, env *wire.Envelope) {
+	n.mu.Lock()
+	txs := make([]*chain.Tx, 0, len(n.mempoolOrder))
+	for _, h := range n.mempoolOrder {
+		if t := n.mempoolTx[h]; t != nil {
+			txs = append(txs, t)
+			if len(txs) >= mempoolReplyBudget {
+				break
+			}
+		}
+	}
+	n.mu.Unlock()
+	if len(txs) == 0 {
+		return
+	}
+	if msg, err := wire.NewEnvelope(wire.MsgMempool, wire.MempoolMsg{Txs: txs}); err == nil {
+		_ = p.Send(msg)
+	}
+}
+
+// onMempool ingests a peer's pending txs through the normal AddTx path, which
+// already deduplicates (seenTx), validates against pending state, and
+// re-broadcasts anything new to our own peers.
+func (n *Node) onMempool(p *p2p.Peer, env *wire.Envelope) {
+	var msg wire.MempoolMsg
+	if json.Unmarshal(env.Payload, &msg) != nil {
+		return
+	}
+	for _, t := range msg.Txs {
+		if t == nil {
+			continue
+		}
+		if err := n.AddTx(t, p.Dial); err != nil && n.cfg.LogBlocks {
+			log.Printf("mempool sync tx rejected: %v", err)
+		}
 	}
 }
 
