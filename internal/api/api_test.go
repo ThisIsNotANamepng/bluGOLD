@@ -26,7 +26,7 @@ func testNode(t *testing.T, mine bool) (*node.Node, *crypto.Wallet, context.Canc
 	t.Cleanup(n.Stop)
 	cancel := func() {}
 	if mine {
-		m := miner.New(n, w, 1, 50*time.Millisecond)
+		m := miner.New(n, w, 1, 50*time.Millisecond, miner.BackendCPU, 0)
 		ctx, c := context.WithCancel(context.Background())
 		cancel = c
 		go m.Run(ctx)

@@ -53,7 +53,7 @@ func TestThreeNodeNetwork(t *testing.T) {
 	b := startNode(t, "B", []string{a.Switch().Addr()}, wB)
 	c := startNode(t, "C", []string{a.Switch().Addr()}, wC)
 
-	m := miner.New(a, wA, 1, 150*time.Millisecond)
+	m := miner.New(a, wA, 1, 150*time.Millisecond, miner.BackendCPU, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go m.Run(ctx)
@@ -94,7 +94,7 @@ func TestLateJoinerCatchesUp(t *testing.T) {
 	wD, _ := crypto.GenerateWallet()
 
 	a := startNode(t, "A", nil, wA)
-	m := miner.New(a, wA, 1, 50*time.Millisecond)
+	m := miner.New(a, wA, 1, 50*time.Millisecond, miner.BackendCPU, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go m.Run(ctx)
@@ -118,7 +118,7 @@ func TestLateJoinerSeesMempool(t *testing.T) {
 	wE, _ := crypto.GenerateWallet()
 
 	a := startNode(t, "A", nil, wA)
-	mineBlocksA := miner.New(a, wA, 1, 50*time.Millisecond)
+	mineBlocksA := miner.New(a, wA, 1, 50*time.Millisecond, miner.BackendCPU, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	go mineBlocksA.Run(ctx)
 
