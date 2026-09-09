@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	MaxFrameSize    = 8 << 20
 )
 
@@ -48,9 +48,16 @@ type PeersMsg struct {
 	Addrs []string `json:"addrs"`
 }
 
+// GetBlocksMsg asks a peer to continue our chain. Locator is a list of block
+// hashes on the requester's best branch, newest first, with exponentially
+// growing gaps and genesis last. The responder answers with the blocks that
+// follow the newest locator entry present on its own active chain, so two
+// nodes find their common ancestor even when their chains diverged long ago.
+// Requesting by height alone cannot do that: the answer would be a run of
+// blocks whose parents the requester has never seen.
 type GetBlocksMsg struct {
-	From  uint64 `json:"from"`
-	Count int    `json:"count"`
+	Locator []chain.Hash `json:"locator"`
+	Count   int          `json:"count"`
 }
 
 type BlocksMsg struct {

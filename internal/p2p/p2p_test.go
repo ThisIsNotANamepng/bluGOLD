@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"blugold/internal/chain"
 	"blugold/internal/wire"
 )
 
@@ -67,7 +68,7 @@ func TestTwoSwitchesHandshakeAndBroadcast(t *testing.T) {
 		return b.PeerCount() == 1 && a.PeerCount() == 1
 	})
 
-	env, _ := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{From: 7, Count: 3})
+	env, _ := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{Locator: []chain.Hash{chain.HashBytes([]byte("tip"))}, Count: 3})
 	b.Broadcast(env, "")
 
 	select {

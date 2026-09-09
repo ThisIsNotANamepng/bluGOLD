@@ -101,8 +101,13 @@ split by hashrate share.
 
 The active chain is the one with the greatest **cumulative difficulty** (sum
 of block difficulties from genesis). Ties break toward the lexically smaller
-tip hash. Blocks whose parent is unknown are buffered as orphans; on reorg,
-transactions from the abandoned branch return to the mempool if still valid.
+tip hash. Blocks whose parent is unknown are buffered as orphans and trigger a
+`getblocks` for the missing ancestry; on reorg, transactions from the abandoned
+branch return to the mempool if still valid.
+
+Fork choice can only pick a winner among branches a node actually holds, so a
+node must be able to download a branch that starts *below* its own tip — see
+block locators below.
 
 State replay uses cached account-state snapshots (checkpoints) every 100
 blocks to avoid full replays on deep reorgs.
@@ -149,19 +154,50 @@ own address are dropped (self-connection guard).
 |---|---|---|
 | `version` | `{protocol, listen_addr, height}` | both, first |
 | `peers` | `{addrs: [host:port]}` | both, periodically |
-| `getblocks` | `{from, count}` (max 500) | requester |
+| `getblocks` | `{locator, count}` (count max 500) | requester |
 | `blocks` | `{blocks: [Block]}` | responder |
 | `newtx` | `{tx}` | gossip |
 | `newblock` | `{block}` | gossip |
 
+### Block locators
+
+`locator` is a list of block hashes from the requester's best branch, newest
+first: its tip, then ancestors at increasing intervals (dense for the last ten
+blocks, then doubling gaps), always ending with genesis. A ~25-entry locator
+covers a chain of any realistic length.
+
+The responder scans the locator in order and answers with up to `count` blocks
+of its **active chain** starting just after the first entry it also holds on
+that chain — genesis if it recognises nothing else. A response is also cut off
+after 5000 transactions so it cannot exceed the frame limit; the requester
+simply asks again from where the short batch ended. That block is the deepest
+common ancestor the two nodes can agree on cheaply, so the answer always
+connects to something the requester already has.
+
+Requesting a height range instead cannot work across a fork: the answer is a
+run of blocks whose parents the requester has never seen, and it can only
+orphan them forever.
+
 Flow:
 
-- On handshake (and every 10s), a node behind a peer sends `getblocks` from
-  its tip height + 1; the peer answers with blocks from its **active chain**
+- On handshake, and every 10s, a node sends `getblocks` to each peer with a
+  locator for its own tip. It asks **unconditionally** — an announced height
+  says nothing about cumulative work, and two chains of equal height can be
+  entirely different. A peer with nothing to add answers with no blocks.
+- On receiving `blocks`, a node inserts them and, if any were new, immediately
+  requests the next batch with a locator anchored at the **last block of the
+  batch**. Anchoring at its own tip would loop: the tip does not move until the
+  branch being downloaded outweighs the current one.
+- A `newblock` whose parent is unknown is buffered as an orphan and answered
+  with a `getblocks` locator, which is how two long-diverged chains discover
+  each other's history.
 - `newblock`/`newtx` are flooded to all peers except the sender; duplicate
-  suppression by hash
+  suppression is by block hash (tree membership) and tx hash. Blocks received
+  in a `blocks` response are *not* re-flooded — they were requested, and every
+  peer polls for itself.
 - Block/tx payloads are the same JSON encodings used for on-disk storage
-- Protocol version is 1; mismatched versions are disconnected
+- Protocol version is 2; mismatched versions are disconnected. Version 1 used
+  `getblocks {from, count}` and could not sync across a fork.
 
 ## Local HTTP API
 

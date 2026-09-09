@@ -113,11 +113,27 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
   mempool tx (e.g. same sender/nonce confirmed in a competing block) would be
   baked into every fresh candidate and the miner would stall forever on
   rejected blocks (`TestStaleMempoolTx` pins this).
+- **Sync is locator-based, never height-based.** `getblocks` carries a block
+  locator (tip, then ancestors with doubling gaps, genesis last) and the peer
+  answers from the deepest entry it shares on its *active* chain. Asking for
+  "blocks above my tip height" only works when your chain is a prefix of the
+  peer's; across a fork every answer is unconnectable orphans (see Gotchas).
+  Three rules keep it converging: ask every peer on connect and every 10s
+  regardless of announced height (height is not work); continue a multi-batch
+  download from the **last block of the previous batch**, not from the tip
+  (the tip does not move until the new branch outweighs the old one); and
+  answer an orphan `newblock` with a locator request, which is what makes two
+  long-diverged mining nodes discover each other's history.
+- Block dedup is the `blocks` tree plus the `rejected` set — there is no
+  "seen blocks" map. One existed and was set *before* insertion, so a block
+  dropped because the orphan buffer was full could never be reconsidered.
 - Announcements: `insertBlockLocked` broadcasts accepted blocks (except to the
   sender) *inside* the lock; `p2p.Switch.Broadcast` spawns a goroutine per
   peer so a slow peer cannot stall the node. Tip-change events are published
-  non-blocking (channel per subscriber, buffered 4).
-- Dedup: `seenTx`/`seenBlock` maps, reset wholesale past 50k entries.
+  non-blocking (channel per subscriber, buffered 4). Blocks arriving in a
+  `blocks` sync response are not re-announced: they were requested, and peers
+  poll for themselves.
+- Dedup: `seenTx` map, reset wholesale past 50k entries.
 - Orphans: buffered keyed by PrevHash, cap 100, promoted recursively on parent arrival.
 
 ## P2P details (internal/p2p)
@@ -139,9 +155,10 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
   topologies through one seed never mesh.
 - A peer that fails `register` (duplicate advertised address, duplicate dial
   key, or shutdown) is **dropped**, not left connected.
-- `Peer.Height` is written at handshake by the read goroutine and read by the
-  sync loop — always read it through `Peer.snapshot()` (mutex-guarded); a
-  bare field read was a data race.
+- `Peer.Height` is written at handshake by the read goroutine; read it only
+  through `Peer.snapshot()` (mutex-guarded) — a bare field read was a data
+  race. It is a stale, work-blind diagnostic: `BestPeerHeight` exists for
+  dashboards, and sync must not gate on it (that was the fork bug).
 - `MaxPeers <= 0` must never reach the switch: `full()` would be instantly
   true and both accept and dial would do nothing. `node.New` only overrides
   the default (32) with positive values.
@@ -208,13 +225,22 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
 10. Test funding via state injection doesn't survive reorg replay; with
     small rewards, a fork chain may not be able to fund a rolled-back tx —
     size test amounts against the *fork* chain's coinbase income.
+11. Height-based `getblocks` never converged diverged chains. Nodes asked for
+    blocks above their own tip height, so a peer on a different chain answered
+    with blocks whose parents were unknown; they piled into the orphan buffer
+    (and were marked "seen", so they were never retried) and the two chains
+    coexisted forever despite live connections. Fixed by block locators —
+    `TestDivergedChainsConverge` and friends in `internal/itest` pin it.
+    Fork choice is only as good as the branches a node manages to download.
 
 ## Known simplifications (documented, accepted)
 
 - No coinbase maturity (a reorg can claw back a fresh reward).
 - No peer scoring, no ban lists, no message rate limiting.
 - Single writer mutex; state replay from checkpoints is O(fork depth).
-- `seen*` dedup maps reset wholesale rather than using an LRU.
+- `seenTx` resets wholesale rather than using an LRU.
+- Every peer is polled with a locator every 10s rather than tracking each
+  peer's announced tip; responses are empty once converged.
 - The node trusts its own clock for timestamp validation (no median-time-past).
 
 ## Possible next steps (if anyone asks)

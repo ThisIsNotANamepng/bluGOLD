@@ -28,6 +28,11 @@ const (
 	maxMempool         = 10000
 	seenResetAt        = 50000
 	syncBatch          = 500
+	// syncTxBudget caps a sync response by transaction count as well as by
+	// block count. A batch of full blocks would otherwise exceed the 8 MiB
+	// frame limit, and WriteFrame's error is invisible to the requester: it
+	// would just keep asking and never receive an answer.
+	syncTxBudget = 5000
 )
 
 type blockEntry struct {
@@ -69,8 +74,7 @@ type Node struct {
 	pending      *state.State
 	pendingDirty bool
 
-	seenTx    map[chain.Hash]struct{}
-	seenBlock map[chain.Hash]struct{}
+	seenTx map[chain.Hash]struct{}
 
 	tipSubs  map[chan *chain.Block]struct{}
 	booting  bool
@@ -95,7 +99,6 @@ func New(cfg Config) (*Node, error) {
 		chainHeights: make(map[uint64]chain.Hash),
 		mempoolTx:    make(map[chain.Hash]*chain.Tx),
 		seenTx:       make(map[chain.Hash]struct{}),
-		seenBlock:    make(map[chain.Hash]struct{}),
 		tipSubs:      make(map[chan *chain.Block]struct{}),
 		state:        state.New(),
 	}
@@ -258,7 +261,6 @@ func (n *Node) insertBlockLocked(b *chain.Block, fromDisk, announce bool, except
 			log.Printf("store append: %v", err)
 		}
 	}
-	n.markBlockSeen(h)
 	n.promoteOrphansLocked(h)
 
 	if announce && !n.booting && n.sw != nil {
@@ -273,12 +275,18 @@ func (n *Node) insertBlockLocked(b *chain.Block, fromDisk, announce bool, except
 }
 
 func (n *Node) addOrphanLocked(b *chain.Block) {
+	h := b.Hash()
 	total := 0
 	for _, l := range n.orphans {
+		for _, have := range l {
+			if have.Hash() == h {
+				return
+			}
+		}
 		total += len(l)
 	}
 	if total >= maxOrphans {
-		return
+		return // dropped, but not remembered: the block can be re-fetched
 	}
 	n.orphans[b.PrevHash] = append(n.orphans[b.PrevHash], b)
 }
@@ -601,13 +609,6 @@ func (n *Node) markSeenTx(h chain.Hash) {
 	}
 }
 
-func (n *Node) markBlockSeen(h chain.Hash) {
-	n.seenBlock[h] = struct{}{}
-	if len(n.seenBlock) > seenResetAt {
-		n.seenBlock = make(map[chain.Hash]struct{})
-	}
-}
-
 func (n *Node) AddTx(t *chain.Tx, exceptPeer string) error {
 	h := t.Hash()
 	n.mu.Lock()
@@ -889,12 +890,60 @@ func (n *Node) publishLocked(tip *chain.Block) {
 	}
 }
 
+// onPeerConnect asks every new peer to continue our chain. We ask
+// unconditionally: a peer's announced height says nothing about how much work
+// its chain carries, and two chains of the same height can be entirely
+// different. A peer with nothing to add simply answers with no blocks.
 func (n *Node) onPeerConnect(p *p2p.Peer) {
-	tipHeight := n.TipHeight()
-	if p.Height > tipHeight {
-		env, _ := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{From: tipHeight + 1, Count: syncBatch})
-		_ = p.Send(env)
+	n.sendGetBlocks(p, n.tipLocator())
+}
+
+// tipLocator returns a block locator for our current best chain.
+func (n *Node) tipLocator() []chain.Hash {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.locatorLocked(n.tip)
+}
+
+// locatorLocked builds a block locator for the branch ending at e: e's hash,
+// then its ancestors, densely at first and with doubling gaps further back,
+// always ending at genesis. A peer scans the list newest-first and answers
+// from the first entry it recognises on its own active chain, which is the
+// deepest common ancestor it can cheaply prove — that is what lets two nodes
+// that forked hundreds of blocks ago exchange history at all.
+func (n *Node) locatorLocked(e *blockEntry) []chain.Hash {
+	if e == nil {
+		return []chain.Hash{n.genesisHash()}
 	}
+	var out []chain.Hash
+	step := uint64(1)
+	cur := e
+	for cur != nil {
+		out = append(out, cur.hash)
+		if cur.block.Height == 0 {
+			return out
+		}
+		if len(out) > 10 {
+			step *= 2
+		}
+		for i := uint64(0); i < step && cur != nil && cur.block.Height > 0; i++ {
+			cur = n.blocks[cur.block.PrevHash]
+		}
+	}
+	// The branch did not reach a stored genesis (it should always). Name ours
+	// anyway so the peer can still answer from the start of its chain.
+	return append(out, n.genesisHash())
+}
+
+func (n *Node) sendGetBlocks(p *p2p.Peer, locator []chain.Hash) {
+	if len(locator) == 0 {
+		return
+	}
+	env, err := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{Locator: locator, Count: syncBatch})
+	if err != nil {
+		return
+	}
+	_ = p.Send(env)
 }
 
 func (n *Node) onMessage(p *p2p.Peer, env *wire.Envelope) {
@@ -912,23 +961,15 @@ func (n *Node) onMessage(p *p2p.Peer, env *wire.Envelope) {
 
 func (n *Node) onGetBlocks(p *p2p.Peer, env *wire.Envelope) {
 	var req wire.GetBlocksMsg
-	if json.Unmarshal(env.Payload, &req) != nil || req.Count <= 0 {
+	if json.Unmarshal(env.Payload, &req) != nil {
 		return
 	}
-	if req.Count > syncBatch {
-		req.Count = syncBatch
+	count := req.Count
+	if count <= 0 || count > syncBatch {
+		count = syncBatch
 	}
 	n.mu.Lock()
-	var out []*chain.Block
-	for h := req.From; h < req.From+uint64(req.Count); h++ {
-		hash, ok := n.chainHeights[h]
-		if !ok {
-			break
-		}
-		if e := n.blocks[hash]; e != nil {
-			out = append(out, e.block)
-		}
-	}
+	out := n.blocksAfterLocatorLocked(req.Locator, count)
 	n.mu.Unlock()
 	if len(out) == 0 {
 		return
@@ -938,23 +979,70 @@ func (n *Node) onGetBlocks(p *p2p.Peer, env *wire.Envelope) {
 	}
 }
 
-func (n *Node) onBlocks(p *p2p.Peer, env *wire.Envelope) {
-	var msg wire.BlocksMsg
-	if json.Unmarshal(env.Payload, &msg) != nil {
-		return
+// blocksAfterLocatorLocked returns up to count blocks of our active chain,
+// starting just after the newest locator entry that also sits on that chain —
+// or from height 1 when we share nothing but genesis.
+func (n *Node) blocksAfterLocatorLocked(locator []chain.Hash, count int) []*chain.Block {
+	if n.tip == nil {
+		return nil
 	}
-	before := n.TipHeight()
-	for _, b := range msg.Blocks {
-		n.acceptRemoteBlock(b, p)
+	start := uint64(1)
+	for _, h := range locator {
+		e := n.blocks[h]
+		if e == nil || n.chainHeights[e.block.Height] != h {
+			continue // unknown, or on a branch we are not building on
+		}
+		start = e.block.Height + 1
+		break
 	}
-	if len(msg.Blocks) == 0 {
-		return
-	}
-	if after := n.TipHeight(); after > before && after < p.Height {
-		if gm, err := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{From: after + 1, Count: syncBatch}); err == nil {
-			_ = p.Send(gm)
+	out := make([]*chain.Block, 0, count)
+	txs := 0
+	for h := start; h <= n.tip.block.Height && len(out) < count; h++ {
+		hash, ok := n.chainHeights[h]
+		if !ok {
+			break
+		}
+		e := n.blocks[hash]
+		if e == nil {
+			break
+		}
+		out = append(out, e.block)
+		if txs += len(e.block.Txs); txs >= syncTxBudget {
+			break // always at least one block; the requester asks again
 		}
 	}
+	return out
+}
+
+func (n *Node) onBlocks(p *p2p.Peer, env *wire.Envelope) {
+	var msg wire.BlocksMsg
+	if json.Unmarshal(env.Payload, &msg) != nil || len(msg.Blocks) == 0 {
+		return
+	}
+	var deepest chain.Hash
+	accepted := 0
+	for _, b := range msg.Blocks {
+		// Sync responses are answers to our own request; peers poll for
+		// themselves, so there is no need to re-flood old blocks.
+		if n.acceptRemoteBlock(b, p, false) {
+			accepted++
+			deepest = b.Hash()
+		}
+	}
+	if accepted == 0 {
+		return
+	}
+	// Ask for the next batch from where this one ended rather than from our
+	// tip: while we are downloading a competing branch our tip does not move
+	// yet, and a tip-anchored request would fetch the same batch forever.
+	n.mu.Lock()
+	anchor := n.blocks[deepest]
+	if anchor == nil {
+		anchor = n.tip
+	}
+	locator := n.locatorLocked(anchor)
+	n.mu.Unlock()
+	n.sendGetBlocks(p, locator)
 }
 
 func (n *Node) onNewBlock(p *p2p.Peer, env *wire.Envelope) {
@@ -962,35 +1050,38 @@ func (n *Node) onNewBlock(p *p2p.Peer, env *wire.Envelope) {
 	if json.Unmarshal(env.Payload, &msg) != nil || msg.Block == nil {
 		return
 	}
-	n.acceptRemoteBlock(msg.Block, p)
+	n.acceptRemoteBlock(msg.Block, p, true)
 }
 
-func (n *Node) acceptRemoteBlock(b *chain.Block, p *p2p.Peer) {
-	n.mu.Lock()
+// acceptRemoteBlock adds a peer's block to the tree and reports whether it was
+// new to us. An orphan triggers a locator request so the peer can send us the
+// ancestry we are missing, however far back the fork point turns out to be.
+func (n *Node) acceptRemoteBlock(b *chain.Block, p *p2p.Peer, announce bool) bool {
 	h := b.Hash()
-	if _, ok := n.seenBlock[h]; ok {
+	n.mu.Lock()
+	if _, known := n.blocks[h]; known || n.rejected[h] {
 		n.mu.Unlock()
-		return
+		return false
 	}
-	n.markBlockSeen(h)
-	err := n.insertBlockLocked(b, false, true, p.Dial)
-	orph := errors.Is(err, ErrOrphan)
-	tipHeight := uint64(0)
-	if n.tip != nil {
-		tipHeight = n.tip.block.Height
+	err := n.insertBlockLocked(b, false, announce, p.Dial)
+	var locator []chain.Hash
+	if errors.Is(err, ErrOrphan) {
+		locator = n.locatorLocked(n.tip)
 	}
 	n.mu.Unlock()
 
-	if n.cfg.LogBlocks && err == nil {
-		log.Printf("accepted block %d %s from %s", b.Height, b.Hash().Short(), p.RemoteAddr())
-	}
-	if orph {
-		if msg, err := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{From: tipHeight + 1, Count: syncBatch}); err == nil {
-			_ = p.Send(msg)
+	switch {
+	case err == nil:
+		if n.cfg.LogBlocks {
+			log.Printf("accepted block %d %s from %s", b.Height, h.Short(), p.RemoteAddr())
 		}
-	} else if err != nil {
+		return true
+	case locator != nil:
+		n.sendGetBlocks(p, locator)
+	default:
 		log.Printf("rejected block %d from %s: %v", b.Height, p.RemoteAddr(), err)
 	}
+	return false
 }
 
 func (n *Node) onNewTx(p *p2p.Peer, env *wire.Envelope) {
@@ -1003,18 +1094,31 @@ func (n *Node) onNewTx(p *p2p.Peer, env *wire.Envelope) {
 	}
 }
 
+// syncLoop is the backstop for convergence when nothing is being gossiped:
+// every peer is asked to continue our chain, because we cannot tell from the
+// outside which of them is on a heavier branch. Peers with nothing to add
+// answer with no blocks, which is the steady state once the network agrees.
 func (n *Node) syncLoop() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		tipHeight := n.TipHeight()
-		if n.sw == nil {
+		if n.sw == nil || n.isStopped() {
 			return
 		}
-		peerHeight, peer := n.sw.BestPeerHeight()
-		if peer != nil && peerHeight > tipHeight {
-			msg, _ := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{From: tipHeight + 1, Count: syncBatch})
-			_ = peer.Send(msg)
+		locator := n.tipLocator()
+		if len(locator) == 0 {
+			continue
 		}
+		env, err := wire.NewEnvelope(wire.MsgGetBlocks, wire.GetBlocksMsg{Locator: locator, Count: syncBatch})
+		if err != nil {
+			continue
+		}
+		n.sw.Broadcast(env, "")
 	}
+}
+
+func (n *Node) isStopped() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.stopped
 }

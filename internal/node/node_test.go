@@ -407,3 +407,106 @@ func TestInvalidTxsRejected(t *testing.T) {
 		t.Fatal("garbage signature accepted into mempool")
 	}
 }
+
+// serveLocator answers a block locator the way onGetBlocks would.
+func serveLocator(t *testing.T, n *Node, locator []chain.Hash, count int) []*chain.Block {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.blocksAfterLocatorLocked(locator, count)
+}
+
+// feed inserts blocks the way a sync response would.
+func feed(t *testing.T, n *Node, blocks []*chain.Block) {
+	t.Helper()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, b := range blocks {
+		if err := n.insertBlockLocked(b, false, false, ""); err != nil {
+			t.Fatalf("feed block %d: %v", b.Height, err)
+		}
+	}
+}
+
+func TestLocatorWalksBackToGenesis(t *testing.T) {
+	n, w := newNode(t)
+	for i := 0; i < 40; i++ {
+		mineOn(t, n, w, tipEntry(t, n))
+	}
+
+	loc := n.tipLocator()
+	if len(loc) < 2 {
+		t.Fatalf("locator too short: %d", len(loc))
+	}
+	if loc[0] != n.TipHash() {
+		t.Errorf("locator must start at the tip, got %s", loc[0].Short())
+	}
+	if last := loc[len(loc)-1]; last != n.genesisHash() {
+		t.Errorf("locator must end at genesis, got %s", last.Short())
+	}
+	if len(loc) >= 40 {
+		t.Errorf("locator should thin out with distance, got %d entries for 40 blocks", len(loc))
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var prev uint64
+	for i, h := range loc {
+		e := n.blocks[h]
+		if e == nil {
+			t.Fatalf("locator entry %d (%s) is not a known block", i, h.Short())
+		}
+		if i > 0 && e.block.Height >= prev {
+			t.Fatalf("locator entry %d height %d does not descend from %d", i, e.block.Height, prev)
+		}
+		prev = e.block.Height
+	}
+}
+
+// TestBlocksAfterLocatorServesFromForkPoint covers the sync answer for two
+// chains that share nothing but genesis. Answering from the requester's tip
+// height instead — as the height-based protocol did — sends blocks whose
+// parents the requester has never seen, so it can never converge.
+func TestBlocksAfterLocatorServesFromForkPoint(t *testing.T) {
+	a, wa := newNode(t)
+	b, wb := newNode(t)
+	for i := 0; i < 4; i++ {
+		mineOn(t, a, wa, tipEntry(t, a))
+	}
+	for i := 0; i < 9; i++ {
+		mineOn(t, b, wb, tipEntry(t, b))
+	}
+
+	forked := a.tipLocator()
+	out := serveLocator(t, b, forked, syncBatch)
+	if len(out) != 9 {
+		t.Fatalf("served %d blocks, want B's whole chain (9)", len(out))
+	}
+	if out[0].Height != 1 || out[0].PrevHash != b.genesisHash() {
+		t.Fatalf("first served block is %d/%s, want height 1 on genesis", out[0].Height, out[0].PrevHash.Short())
+	}
+
+	// Feeding that answer back must be enough to converge.
+	feed(t, a, out)
+	if a.TipHash() != b.TipHash() {
+		t.Fatalf("A did not adopt B's heavier chain: %s vs %s", a.TipHash().Short(), b.TipHash().Short())
+	}
+	if got := serveLocator(t, b, a.tipLocator(), syncBatch); len(got) != 0 {
+		t.Fatalf("converged nodes still exchange %d blocks", len(got))
+	}
+
+	// With a shared prefix, only the missing suffix is served, capped at count.
+	mineOn(t, b, wb, tipEntry(t, b))
+	mineOn(t, b, wb, tipEntry(t, b))
+	if got := serveLocator(t, b, a.tipLocator(), syncBatch); len(got) != 2 || got[0].Height != 10 {
+		t.Fatalf("suffix sync served %d blocks starting at %d, want 2 starting at 10", len(got), got[0].Height)
+	}
+	if got := serveLocator(t, b, a.tipLocator(), 1); len(got) != 1 {
+		t.Fatalf("count cap ignored: served %d blocks", len(got))
+	}
+
+	// A locator naming only a stale branch still finds the common ancestor.
+	if got := serveLocator(t, b, forked, syncBatch); len(got) != 11 || got[0].Height != 1 {
+		t.Fatalf("stale locator served %d blocks, want 11 from height 1", len(got))
+	}
+}

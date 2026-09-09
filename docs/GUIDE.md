@@ -132,6 +132,8 @@ learn, so the network meshes even if the seed goes down later.
 | `tx rejected: bad nonce` | You sent twice very fast; wait for the first tx to be mined. |
 | Balance unchanged after a send | It's waiting for a block (~6 min). `scan` shows recent blocks. |
 | Height differs between friends | Normal during sync; it catches up within seconds of connecting. |
+| `peers: 0` against a node you know is up | Version mismatch — every node must run the same protocol version. Rebuild and restart all of them. |
+| Peers connected, but heights and tips never converge | Everyone is not on the same build. Nodes running the old height-based sync (protocol 1) mine parallel chains forever; upgrade every node. On the upgraded build the lighter chain is downloaded and abandoned, so its miner's balance drops to 0 — those coins were only ever real on the losing chain. |
 | Difficulty shot up, blocks are slow | Someone joined with a big rig. It settles at the next retarget. |
 
 ## 9. Cheat sheet

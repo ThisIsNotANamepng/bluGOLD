@@ -11,7 +11,8 @@ import (
 
 func TestFrameRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	env, err := NewEnvelope(MsgGetBlocks, GetBlocksMsg{From: 5, Count: 10})
+	locator := []chain.Hash{chain.HashBytes([]byte("tip")), chain.HashBytes([]byte("genesis"))}
+	env, err := NewEnvelope(MsgGetBlocks, GetBlocksMsg{Locator: locator, Count: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,8 +30,11 @@ func TestFrameRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(got.Payload, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.From != 5 || m.Count != 10 {
-		t.Errorf("payload = %+v", m)
+	if m.Count != 10 || len(m.Locator) != 2 {
+		t.Fatalf("payload = %+v", m)
+	}
+	if m.Locator[0] != locator[0] || m.Locator[1] != locator[1] {
+		t.Errorf("locator changed across frame: %v", m.Locator)
 	}
 }
 
