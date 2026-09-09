@@ -130,8 +130,8 @@ func TestDivergedMinersConverge(t *testing.T) {
 		t.Fatal("AddKnown failed")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go miner.New(a, wA, 1, 200*time.Millisecond).Run(ctx)
-	go miner.New(b, wB, 1, 200*time.Millisecond).Run(ctx)
+	go miner.New(a, wA, 1, 200*time.Millisecond, miner.BackendCPU, 0).Run(ctx)
+	go miner.New(b, wB, 1, 200*time.Millisecond, miner.BackendCPU, 0).Run(ctx)
 
 	waitFor(t, 20*time.Second, "nodes connect", func() bool {
 		return a.Switch().PeerCount() == 1 && b.Switch().PeerCount() == 1

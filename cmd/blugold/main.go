@@ -56,7 +56,7 @@ commands:
   keygen [--force]     regenerate the wallet
   address              print this wallet's address
   serve                run a node (p2p + local API), no mining
-  mine [-t N]          run a node and mine BLG
+  mine [-t N] [-backend auto|cpu|gpu]   run a node and mine BLG
   send <addr> <amount> send BLG to an address (via a running node)
   balance [addr]       show balance
   info                 show chain status
@@ -204,12 +204,14 @@ func cmdServe(args []string) {
 		fs.Usage()
 		os.Exit(2)
 	}
-	runNode(opts, 0)
+	runNode(opts, 0, miner.BackendAuto, 0)
 }
 
 func cmdMine(args []string) {
 	fs := flag.NewFlagSet("mine", flag.ExitOnError)
-	threads := fs.Int("t", 1, "mining threads")
+	threads := fs.Int("t", 1, "CPU mining threads (ignored if the GPU backend is used)")
+	backendFlag := fs.String("backend", "auto", "mining backend: auto, cpu, or gpu (auto benchmarks both and picks the faster; gpu needs a build with \"-tags gpu\")")
+	gpuBatch := fs.Int("gpu-batch", 0, "nonces per GPU dispatch (0 = default)")
 	opts := parseNodeFlags(fs, args)
 	if fs.NArg() > 0 {
 		fs.Usage()
@@ -218,12 +220,16 @@ func cmdMine(args []string) {
 	if *threads < 1 {
 		fatalf("-t must be at least 1")
 	}
-	runNode(opts, *threads)
+	backend, err := miner.ParseBackend(*backendFlag)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	runNode(opts, *threads, backend, *gpuBatch)
 }
 
 // runNode boots the node, the local API and (if threads > 0) a miner, then
 // blocks until SIGINT/SIGTERM.
-func runNode(opts *nodeOpts, threads int) {
+func runNode(opts *nodeOpts, threads int, backend miner.Backend, gpuBatch int) {
 	w := loadOrCreateWallet(opts.dir)
 	adv := opts.adv
 	if adv == "" {
@@ -255,8 +261,11 @@ func runNode(opts *nodeOpts, threads int) {
 
 	mining := threads > 0
 	var mCancel context.CancelFunc
+	var minerBackend string
 	if mining {
-		m := miner.New(n, w, threads, 0)
+		m := miner.New(n, w, threads, 0, backend, gpuBatch)
+		m.EnsureBackend() // benchmark/pick now so the banner below reflects reality
+		minerBackend = m.BackendName()
 		n.SetHashrateSource(m.Hashrate)
 		var mctx context.Context
 		mctx, mCancel = context.WithCancel(context.Background())
@@ -280,7 +289,11 @@ func runNode(opts *nodeOpts, threads int) {
 	}
 	fmt.Printf("api:        http://%s\n", opts.apiListen)
 	if mining {
-		fmt.Printf("mining:     %d threads\n", threads)
+		if strings.HasPrefix(minerBackend, "gpu") {
+			fmt.Printf("mining:     %s backend\n", minerBackend)
+		} else {
+			fmt.Printf("mining:     %s backend (%d threads)\n", minerBackend, threads)
+		}
 	} else {
 		fmt.Printf("mining:     off (run: blugold mine)\n")
 	}

@@ -179,13 +179,43 @@ Do not introduce cycles: `node` must not be imported by `p2p`/`store`/`chain`;
 
 ## Miner details (internal/miner)
 
-- Shared `atomic.Uint64` nonce across workers; worker id in `ExtraNonce`
-  guarantees unique headers. Per-instance hashrate counter (1s window).
-- Loop: `SubscribeTips()` → `BuildCandidate` → workers race → submit or bail
-  on tip change. Node tips channel drives restarts.
+- Shared `atomic.Uint64` nonce across CPU workers; worker id in `ExtraNonce`
+  guarantees unique headers. Per-instance hashrate counter (1s window),
+  backend-agnostic (`m.total`/`m.rate` are fed by both the CPU and GPU paths).
+- Loop: `SubscribeTips()` → `BuildCandidate` → search (CPU workers race, or
+  one GPU dispatch loop) → submit or bail on tip change. Node tips channel
+  drives restarts.
 - At difficulty 1 mining is a firehose (microseconds/block). Integration tests
   throttle with `minPause` (e.g. 150ms). A real network ramps difficulty via
   retargeting within a minute.
+- **GPU backend (`-tags gpu`)**: `gpu_opencl.go` is bluGOLD's one intentional
+  exception to "zero dependencies, pure stdlib" (core design decision #1) —
+  it needs cgo and an OpenCL SDK on the *build* machine, so it's excluded
+  from the default build entirely (`gpu_stub.go` stands in with `!gpu`) and
+  only compiled in when a contributor opts in. Runtime behavior degrades
+  gracefully with no GPU present: forced `-backend gpu` logs a warning and
+  falls back to CPU; `-backend auto` benchmarks both (`resolveBackend` in
+  `miner.go`) and just picks CPU.
+- **Midstate optimization**: `Block.HeaderBytes()`'s only variable-length
+  field is the miner address, which is always exactly 40 bytes for a valid
+  (non-coinbase) address — so a candidate's header is always the same total
+  length, and every field except `Nonce` (the trailing 8 bytes) is identical
+  across every nonce trial in one mining round. `sha256mid.go` exploits this:
+  it runs SHA-256 compression once over the header's complete 64-byte blocks
+  (the "midstate"), and the GPU kernel resumes from that state, computing
+  only the final partial block per trial instead of re-hashing the whole
+  header. `buildMidstate` checks this shape defensively (word-aligned
+  remainder, room for padding) and reports `ok=false` if a future codec
+  change ever breaks the assumption, so GPU mining fails safe onto the CPU
+  path instead of mining against the wrong bytes.
+  `TestMidstateMatchesHash` pins the two paths' outputs as identical.
+- The OpenCL kernel (in `gpu_opencl.go`) mirrors `sha256mid.go`'s Go
+  implementation function-for-function; keep them in sync if either changes.
+  One cgo gotcha worth remembering: `clSetKernelArg` needs a pointer to each
+  `cl_mem` handle, but `&someStructField` where the field's Go type is
+  itself a pointer (like `C.cl_mem`) panics at runtime ("Go pointer to
+  unpinned Go pointer") — copy the handle into a local `uintptr` first and
+  take *that* address instead (see `memArg` in `gpu_opencl.go`).
 
 ## CLI (cmd/blugold)
 

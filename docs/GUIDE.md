@@ -41,7 +41,7 @@ different ports (shown in step 4).
 ./blugold mine -t 20
 ```
 
-- `-t` is the number of mining threads — one per core is right.
+- `-t` is the number of CPU mining threads — one per core is right.
 - A fresh chain mines blocks instantly, then difficulty ramps up over
   roughly an hour until a block takes ~6 minutes.
 - Once difficulty settles, a **solo** miner earns 1 BLG per block ≈
@@ -51,6 +51,28 @@ different ports (shown in step 4).
 - Expect randomness: any given hour lands 10 ± 3 blocks; the average is 10.
 
 Leave it running. Blocks pay straight into your wallet.
+
+### GPU mining
+
+`mine` takes `-backend auto|cpu|gpu` (default `auto`): auto times a quick
+benchmark of both and mines with whichever is faster, so you don't have to
+know in advance whether your CPU or GPU wins. Force one with `-backend cpu`
+or `-backend gpu`.
+
+GPU support uses OpenCL and isn't in a plain `go build` — it's the one
+opt-in exception to bluGOLD's zero-dependency rule, since it needs cgo and
+an OpenCL SDK on the machine that *builds* the binary (not just the one
+that runs it). Build it in with:
+
+```sh
+go build -tags gpu -o blugold ./cmd/blugold
+```
+
+If that binary finds no OpenCL GPU at runtime, `-backend gpu` logs a
+warning and falls back to CPU rather than refusing to mine; `-backend auto`
+just quietly picks CPU. `-gpu-batch N` tunes how many nonces one GPU
+dispatch searches (0 = a sane default) if you need to trade responsiveness
+for throughput on unusual hardware.
 
 ## 4. Run another node / join the network
 

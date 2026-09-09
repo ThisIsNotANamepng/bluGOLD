@@ -25,7 +25,7 @@ func TestMinerProducesBlocks(t *testing.T) {
 	}
 	defer n.Stop()
 
-	m := New(n, w, 2, 50*time.Millisecond)
+	m := New(n, w, 2, 50*time.Millisecond, BackendCPU, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go m.Run(ctx)

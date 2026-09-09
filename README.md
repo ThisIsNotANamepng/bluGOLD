@@ -11,7 +11,8 @@ mining, joining the network, and sending coins in five minutes.
 
 ## Features
 
-- Proof-of-work mining (sha256), multi-threaded: more compute = more coins
+- Proof-of-work mining (sha256), multi-threaded on CPU or (opt-in, see
+  below) OpenCL GPU: more compute = more coins
 - Auto difficulty retargeting toward a 6-minute block target
 - Solo miners average exactly **10 BLG per hour** (1 BLG per block); with
   friends mining, blocks split proportionally to hashrate
@@ -19,7 +20,9 @@ mining, joining the network, and sending coins in five minutes.
   10,080 blocks (~6 weeks), no premine
 - Real wallets: ed25519 keypairs, `blu1...` addresses, signed transactions
 - P2P networking over TCP: gossip blocks/txs, sync from seeds, heaviest-chain fork choice
-- Zero dependencies — pure Go stdlib, easy to audit in a security club
+- Zero dependencies by default — pure Go stdlib, easy to audit in a security
+  club. GPU mining is the one opt-in exception: it needs cgo + an OpenCL SDK
+  and is left out unless you build with `-tags gpu`.
 
 ## Quickstart
 
@@ -27,6 +30,13 @@ Requires Go 1.24+.
 
 ```sh
 go build -o blugold ./cmd/blugold
+```
+
+Have a GPU and an OpenCL SDK installed? Build with `-tags gpu` instead to
+enable GPU mining (see below):
+
+```sh
+go build -tags gpu -o blugold ./cmd/blugold
 ```
 
 **Terminal 1 — mine some coins:**
@@ -39,6 +49,13 @@ go build -o blugold ./cmd/blugold
 The first blocks mine instantly (difficulty starts at 1) and difficulty
 climbs for about an hour until blocks take ~6 minutes. From then on a solo
 miner earns a steady 10 BLG/hour.
+
+`mine` picks CPU or GPU automatically (`-backend auto`, the default) by
+timing a quick benchmark of both — pass `-backend cpu` or `-backend gpu` to
+force one. Forcing `gpu` on a binary built without `-tags gpu` (or with no
+OpenCL device found) logs a warning and falls back to CPU rather than
+refusing to mine. See the [running guide](docs/GUIDE.md#gpu-mining) for
+details.
 
 **Terminal 2 — a friend joins (another machine or datadir):**
 
