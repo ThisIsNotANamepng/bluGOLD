@@ -107,3 +107,41 @@ func TestLateJoinerCatchesUp(t *testing.T) {
 	})
 	t.Logf("late joiner synced to height %d", d.TipHeight())
 }
+
+// TestLateJoinerSeesMempool pins the getmempool/mempool exchange: a tx
+// broadcast before a peer connects was previously invisible to it until the
+// tx confirmed in a block, because flood gossip only reaches peers already
+// connected at broadcast time. A freshly connected node must request and
+// receive the existing mempool instead of waiting on the next block.
+func TestLateJoinerSeesMempool(t *testing.T) {
+	wA, _ := crypto.GenerateWallet()
+	wE, _ := crypto.GenerateWallet()
+
+	a := startNode(t, "A", nil, wA)
+	mineBlocksA := miner.New(a, wA, 1, 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	go mineBlocksA.Run(ctx)
+
+	waitFor(t, 15*time.Second, "A mines to height 3", func() bool { return a.TipHeight() >= 3 })
+	// Stop mining so the tx below stays pending instead of confirming into a
+	// block, which would let it reach E via ordinary block sync and defeat
+	// the point of the test.
+	cancel()
+
+	txid, err := a.Send(wE.Address(), 1e8, 0)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitFor(t, 5*time.Second, "A's mempool holds the pending tx", func() bool {
+		return a.MempoolSize() >= 1
+	})
+	t.Logf("A has pending tx %s, no connected peers yet", txid.Short())
+
+	// E joins only now, after the tx was already gossiped and A has no peers
+	// to re-flood it to. E must pull it via getmempool on connect.
+	e := startNode(t, "E", []string{a.Switch().Addr()}, wE)
+	waitFor(t, 15*time.Second, "E sees A's pending tx via mempool sync", func() bool {
+		return e.MempoolSize() >= 1
+	})
+	t.Log("late joiner synced the mempool without waiting for a block")
+}
