@@ -147,12 +147,15 @@ payload = {"type": <msg>, "payload": {...}}
 ```
 
 On connect, both sides immediately send `version`; the first non-version
-message from an unhandshaked peer drops the connection. Peers advertising our
-own address are dropped (self-connection guard).
+message from an unhandshaked peer drops the connection. Each node picks a
+random `nonce` at startup; a peer that echoes our nonce is us (self-dial)
+and is dropped. Advertised listen addresses are *not* an identity —
+behind NAT many nodes claim the same `192.168.1.x:7007`, and the seed
+must keep all of them so it can relay.
 
 | Type | Payload | Direction |
 |---|---|---|
-| `version` | `{protocol, listen_addr, height}` | both, first |
+| `version` | `{protocol, listen_addr, height, nonce?}` (`nonce` optional, omitted = 0) | both, first |
 | `peers` | `{addrs: [host:port]}` | both, periodically |
 | `getblocks` | `{locator, count}` (count max 500) | requester |
 | `blocks` | `{blocks: [Block]}` | responder |

@@ -117,10 +117,10 @@ systemctl enable --now blugold
 ```
 
 Share the address `203.0.113.7:7007` with friends — everyone joins with
-`blugold serve --seed 203.0.113.7:7007`. Nodes gossip peer addresses, so
-the network meshes beyond the seed. `blugold peers`-style visibility comes
-free: `curl 127.0.0.1:34335/api/peers` on the seed, or `blugold info`
-shows your peer count.
+`blugold serve --seed 203.0.113.7:7007`. Behind NAT, `curl 127.0.0.1:34335/api/peers`
+on a laptop may only list the seed; that is expected. The seed relays
+blocks and transactions, so you can still send coins. Nodes also gossip
+reachable peer addresses, so two machines on the same LAN mesh directly.
 
 Care on a public box: `wallet.json` is mode 0600 but lives on a machine you
 don't fully control — mine on your rig, not the seed. The API

@@ -44,6 +44,9 @@ type VersionMsg struct {
 	Protocol   int    `json:"protocol"`
 	ListenAddr string `json:"listen_addr"`
 	Height     uint64 `json:"height"`
+	// Nonce uniquely identifies this process. Peers with the same nonce are
+	// the same node (self-dial or a second connection). It is not a secret.
+	Nonce uint64 `json:"nonce,omitempty"`
 }
 
 type PeersMsg struct {

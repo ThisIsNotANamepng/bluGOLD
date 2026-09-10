@@ -155,6 +155,7 @@ learn, so the network meshes even if the seed goes down later.
 | Balance unchanged after a send | It's waiting for a block (~6 min). `scan` shows recent blocks. |
 | Height differs between friends | Normal during sync; it catches up within seconds of connecting. |
 | `peers: 0` against a node you know is up | Version mismatch — every node must run the same protocol version. Rebuild and restart all of them. |
+| `/api/peers` only lists the seed | Normal for NAT'd laptops across the Internet — they cannot dial each other. Same-LAN or otherwise reachable peers may connect directly and also show up. The seed relays txs and blocks either way. You still need someone mining, then ~6 min for a block. If a send never shows up even after a block, the seed is on an old build that dropped extra friends who advertised the same LAN IP — rebuild and restart the VPS. |
 | Peers connected, but heights and tips never converge | Everyone is not on the same build. Nodes running the old height-based sync (protocol 1) mine parallel chains forever; upgrade every node. On the upgraded build the lighter chain is downloaded and abandoned, so its miner's balance drops to 0 — those coins were only ever real on the losing chain. |
 | Difficulty shot up, blocks are slow | Someone joined with a big rig. It settles at the next retarget. |
 
