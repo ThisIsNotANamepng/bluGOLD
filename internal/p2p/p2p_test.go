@@ -174,7 +174,7 @@ func TestSeedDialing(t *testing.T) {
 func TestNoSelfConnection(t *testing.T) {
 	a := startSwitch(t, "127.0.0.1:0")
 	b := New("127.0.0.1:0", "127.0.0.1:0", []string{"127.0.0.1:" + portOf(t, a)})
-	b.Advertise = a.Advertise // pretend to be the same node
+	b.Advertise = "203.0.113.8:7007" // different from a; identity is the nonce
 	b.Nonce = a.Nonce
 	if err := b.Start(); err != nil {
 		t.Fatal(err)
@@ -185,6 +185,31 @@ func TestNoSelfConnection(t *testing.T) {
 	if a.PeerCount() != 0 {
 		t.Fatalf("self connection accepted: %d peers", a.PeerCount())
 	}
+}
+
+// Two distinct nodes can advertise the same public address (mis-set --adv,
+// or two processes on one host). Matching advert must not look like a
+// self-dial when the nonces differ.
+func TestDistinctNonceNotSelfDespiteSharedPublicAdvert(t *testing.T) {
+	const shared = "203.0.113.7:7007"
+	a := New("127.0.0.1:0", shared, nil)
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.Stop)
+
+	b := New("127.0.0.1:0", shared, []string{a.Addr()})
+	if a.Nonce == b.Nonce {
+		t.Fatal("nonces collided")
+	}
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b.Stop)
+
+	waitFor(t, 8*time.Second, func() bool {
+		return a.PeerCount() == 1 && b.PeerCount() == 1
+	})
 }
 
 // Two home/campus nodes behind NAT typically advertise the same RFC1918

@@ -118,7 +118,7 @@ systemctl enable --now blugold
 
 Share the address `203.0.113.7:7007` with friends — everyone joins with
 `blugold serve --seed 203.0.113.7:7007`. Behind NAT, `curl 127.0.0.1:34335/api/peers`
-on a laptop will only list the seed; that is expected. The seed relays
+on a laptop may only list the seed; that is expected. The seed relays
 blocks and transactions, so you can still send coins. Nodes also gossip
 reachable peer addresses, so two machines on the same LAN mesh directly.
 

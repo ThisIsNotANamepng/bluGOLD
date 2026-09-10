@@ -155,7 +155,7 @@ must keep all of them so it can relay.
 
 | Type | Payload | Direction |
 |---|---|---|
-| `version` | `{protocol, listen_addr, height, nonce}` | both, first |
+| `version` | `{protocol, listen_addr, height, nonce?}` (`nonce` optional, omitted = 0) | both, first |
 | `peers` | `{addrs: [host:port]}` | both, periodically |
 | `getblocks` | `{locator, count}` (count max 500) | requester |
 | `blocks` | `{blocks: [Block]}` | responder |

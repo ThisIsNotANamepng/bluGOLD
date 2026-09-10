@@ -335,15 +335,10 @@ func (s *Switch) heightSafe() uint64 {
 }
 
 func (s *Switch) isSelf(v wire.VersionMsg) bool {
-	if v.Nonce != 0 && v.Nonce == s.Nonce {
-		return true
-	}
-	// Legacy peers (nonce 0) and anyone claiming our public listen
-	// address. Private/unspecified adverts are not unique — half the
-	// club's laptops will say 192.168.1.5:7007 — so they cannot be
-	// treated as "this is me" once we have a nonce.
-	if v.Nonce != 0 && !isPublicDialable(v.ListenAddr) {
-		return false
+	if v.Nonce != 0 {
+		// Nonce is the identity. A different process that happens to
+		// advertise our public address is still a distinct peer.
+		return v.Nonce == s.Nonce
 	}
 	return s.isSelfAddr(v.ListenAddr)
 }
