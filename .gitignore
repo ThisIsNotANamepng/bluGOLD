@@ -1,3 +1,4 @@
 /blugold
 /blugold-data
 *.test
+.DS_Store

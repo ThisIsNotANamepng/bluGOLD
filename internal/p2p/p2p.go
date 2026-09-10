@@ -2,10 +2,12 @@
 package p2p
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	mathrand "math/rand"
 	"net"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ type Peer struct {
 	Conn   net.Conn
 	Dial   string // key in peers map
 	Advert string // peer's advertised listen address
+	Nonce  uint64 // peer's handshake nonce; identity across NAT
 	Height uint64
 
 	mu        sync.Mutex
@@ -54,6 +57,7 @@ func (p *Peer) snapshot() (height uint64, handshook bool) {
 type Switch struct {
 	Listen    string // listen address, e.g. ":7007"
 	Advertise string // what we tell peers to dial, e.g. "192.168.1.5:7007"
+	Nonce     uint64 // random per-process id sent in version
 	Seeds     []string
 	MaxPeers  int
 
@@ -79,6 +83,7 @@ func New(listen, advertise string, seeds []string) *Switch {
 	s := &Switch{
 		Listen:    listen,
 		Advertise: advertise,
+		Nonce:     newNonce(),
 		Seeds:     seeds,
 		MaxPeers:  32,
 		peers:     make(map[string]*Peer),
@@ -105,6 +110,9 @@ func (s *Switch) AddKnown(addr string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if addr == "" || s.closed {
+		return false
+	}
+	if isUnspecifiedAddr(addr) {
 		return false
 	}
 	if addr == s.Advertise || addr == s.Listen {
@@ -229,7 +237,7 @@ func (s *Switch) dialLoop() {
 		if len(candidates) == 0 {
 			return
 		}
-		rand.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
+		mathrand.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
 		for _, addr := range candidates {
 			if s.isClosed() || s.full() {
 				return
@@ -264,6 +272,7 @@ func (s *Switch) serveConn(conn net.Conn, dialAddr string) {
 		Protocol:   wire.ProtocolVersion,
 		ListenAddr: s.Advertise,
 		Height:     s.heightSafe(),
+		Nonce:      s.Nonce,
 	})
 	if err != nil {
 		conn.Close()
@@ -290,11 +299,12 @@ func (s *Switch) serveConn(conn net.Conn, dialAddr string) {
 				s.dropPeer(peer)
 				return
 			}
-			if s.isSelfAddr(v.ListenAddr) {
+			if s.isSelf(v) {
 				s.dropPeer(peer) // self connection
 				return
 			}
 			peer.Advert = v.ListenAddr
+			peer.Nonce = v.Nonce
 			peer.Height = v.Height
 			peer.setHandshook()
 			if !s.register(peer) {
@@ -324,6 +334,20 @@ func (s *Switch) heightSafe() uint64 {
 	return s.GetHeight()
 }
 
+func (s *Switch) isSelf(v wire.VersionMsg) bool {
+	if v.Nonce != 0 && v.Nonce == s.Nonce {
+		return true
+	}
+	// Legacy peers (nonce 0) and anyone claiming our public listen
+	// address. Private/unspecified adverts are not unique — half the
+	// club's laptops will say 192.168.1.5:7007 — so they cannot be
+	// treated as "this is me" once we have a nonce.
+	if v.Nonce != 0 && !isPublicDialable(v.ListenAddr) {
+		return false
+	}
+	return s.isSelfAddr(v.ListenAddr)
+}
+
 func (s *Switch) isSelfAddr(addr string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -339,9 +363,21 @@ func (s *Switch) register(p *Peer) bool {
 	if s.closed {
 		return false
 	}
-	for _, existing := range s.peers {
-		if existing.Advert == p.Advert {
-			return false
+	if p.Nonce != 0 {
+		for _, existing := range s.peers {
+			if existing.Nonce == p.Nonce {
+				return false
+			}
+		}
+	} else if p.Advert != "" && isPublicDialable(p.Advert) {
+		// Pre-nonce peers: still collapse two connections to the same
+		// public identity, but never key off a LAN/unspecified advert —
+		// those collide constantly behind NAT and used to drop everyone
+		// after the first friend to reach the seed.
+		for _, existing := range s.peers {
+			if existing.Advert == p.Advert {
+				return false
+			}
 		}
 	}
 	if _, ok := s.peers[p.Dial]; ok {
@@ -460,4 +496,49 @@ func (s *Switch) BestPeerHeight() (uint64, *Peer) {
 
 func (s *Switch) String() string {
 	return fmt.Sprintf("switch[%s peers=%d]", s.Listen, s.PeerCount())
+}
+
+func newNonce() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		n := uint64(time.Now().UnixNano())
+		if n == 0 {
+			return 1
+		}
+		return n
+	}
+	n := binary.LittleEndian.Uint64(b[:])
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+func hostOf(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+func isUnspecifiedAddr(addr string) bool {
+	host := hostOf(addr)
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+func isPublicDialable(addr string) bool {
+	host := hostOf(addr)
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true // hostname
+	}
+	return !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast()
 }
