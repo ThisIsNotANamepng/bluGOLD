@@ -128,3 +128,41 @@ func TestBlocksEndpoint(t *testing.T) {
 		t.Fatalf("blocks response: %s", resp)
 	}
 }
+
+func TestLeaderboardEndpoint(t *testing.T) {
+	n, w1, _ := testNode(t, false)
+	w2, _ := crypto.GenerateWallet()
+	for i := 0; i < 2; i++ {
+		b := n.BuildCandidate(w1.Address())
+		if b == nil {
+			t.Fatal("missing candidate for first miner")
+		}
+		if err := n.SubmitSolution(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := n.BuildCandidate(w2.Address())
+	if b == nil {
+		t.Fatal("missing candidate for second miner")
+	}
+	if err := n.SubmitSolution(b); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(New(n))
+	defer srv.Close()
+	resp := httpGet(t, srv.URL+"/api/leaderboard?limit=2")
+	first := strings.Index(resp, string(w1.Address()))
+	second := strings.Index(resp, string(w2.Address()))
+	if first < 0 || second < 0 || first > second {
+		t.Fatalf("expected richest wallet to rank first: %s", resp)
+	}
+	if !strings.Contains(resp, `"balance": 200000000`) {
+		t.Fatalf("expected wallet balances: %s", resp)
+	}
+
+	resp = httpGet(t, srv.URL+"/api/leaderboard?limit=2&mode=miners")
+	if !strings.Contains(resp, `"blocks": 2`) || !strings.Contains(resp, `"earned": 200000000`) {
+		t.Fatalf("expected miner totals: %s", resp)
+	}
+}

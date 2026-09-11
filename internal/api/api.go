@@ -75,6 +75,20 @@ func New(n *node.Node) http.Handler {
 		}
 		writeJSON(w, n.RecentBlocks(count))
 	})
+	mux.HandleFunc("GET /api/leaderboard", func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 10
+		}
+		switch r.URL.Query().Get("mode") {
+		case "", "wallets":
+			writeJSON(w, n.WalletLeaderboard(limit))
+		case "miners":
+			writeJSON(w, n.MinerLeaderboard(limit))
+		default:
+			httpError(w, http.StatusBadRequest, "mode must be wallets or miners")
+		}
+	})
 	mux.HandleFunc("GET /api/peers", func(w http.ResponseWriter, r *http.Request) {
 		peers := []string{}
 		if n.Switch() != nil {

@@ -830,6 +830,92 @@ type BlockSummary struct {
 	Amount     uint64         `json:"coinbase_amount"`
 }
 
+type MinerScore struct {
+	Address crypto.Address `json:"address"`
+	Blocks  uint64         `json:"blocks"`
+	Earned  uint64         `json:"earned"`
+}
+
+type WalletScore struct {
+	Address chain.Address `json:"address"`
+	Balance uint64        `json:"balance"`
+}
+
+func (n *Node) WalletLeaderboard(limit int) []WalletScore {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 10
+	}
+	accounts := n.state.Accounts()
+	out := make([]WalletScore, 0, len(accounts))
+	for address, account := range accounts {
+		out = append(out, WalletScore{Address: address, Balance: account.Balance})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Balance != out[j].Balance {
+			return out[i].Balance > out[j].Balance
+		}
+		return out[i].Address < out[j].Address
+	})
+	if limit > len(out) {
+		limit = len(out)
+	}
+	return out[:limit]
+}
+
+func (n *Node) MinerLeaderboard(limit int) []MinerScore {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 10
+	}
+	if n.tip == nil {
+		return nil
+	}
+
+	scores := make(map[crypto.Address]*MinerScore)
+	for height := uint64(1); height <= n.tip.block.Height; height++ {
+		hash, ok := n.chainHeights[height]
+		if !ok {
+			continue
+		}
+		entry := n.blocks[hash]
+		if entry == nil || len(entry.block.Txs) == 0 {
+			continue
+		}
+
+		block := entry.block
+		score := scores[block.Miner]
+		if score == nil {
+			score = &MinerScore{Address: block.Miner}
+			scores[block.Miner] = score
+		}
+		score.Blocks++
+		score.Earned += block.Txs[0].Amount
+	}
+
+	out := make([]MinerScore, 0, len(scores))
+	for _, score := range scores {
+		out = append(out, *score)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Earned != out[j].Earned {
+			return out[i].Earned > out[j].Earned
+		}
+		if out[i].Blocks != out[j].Blocks {
+			return out[i].Blocks > out[j].Blocks
+		}
+		return out[i].Address < out[j].Address
+	})
+	if limit > len(out) {
+		limit = len(out)
+	}
+	return out[:limit]
+}
+
 func (n *Node) RecentBlocks(count int) []BlockSummary {
 	n.mu.Lock()
 	defer n.mu.Unlock()
