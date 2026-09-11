@@ -61,6 +61,7 @@ commands:
   balance [addr]       show balance
   info                 show chain status
   scan [N]             show the last N blocks
+	leaderboard [N]      show the top wallets (use --miners for mining totals)
   version              print version
 
 flags are per-command; run "blugold <command> -h" for help.
@@ -91,6 +92,8 @@ func main() {
 		cmdInfo(os.Args[2:])
 	case "scan":
 		cmdScan(os.Args[2:])
+	case "leaderboard":
+		cmdLeaderboard(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("bluGOLD v0.1.0 (BLG)")
 	case "help", "--help", "-h":
@@ -486,6 +489,57 @@ func cmdScan(args []string) {
 		age := time.Since(time.UnixMilli(b.Time)).Round(time.Second)
 		fmt.Printf("%-7d %-16s %-13s %-11d %-34s %s BLG\n",
 			b.Height, age, b.Hash.Short(), b.Difficulty, shortAddr(b.Miner), chain.FormatAmount(b.Amount))
+	}
+}
+
+func cmdLeaderboard(args []string) {
+	fs := flag.NewFlagSet("leaderboard", flag.ExitOnError)
+	api := fs.String("api", fmt.Sprintf("http://127.0.0.1:%d", defaultAPIPort), "node api url")
+	miners := fs.Bool("miners", false, "rank by mined blocks and coinbase earnings")
+	fs.Parse(args)
+	limit := 10
+	if fs.NArg() > 0 {
+		n, err := strconv.Atoi(fs.Arg(0))
+		if err != nil || n <= 0 {
+			fatalf("leaderboard count must be a positive integer")
+		}
+		limit = n
+	}
+	mode := "wallets"
+	if *miners {
+		mode = "miners"
+	}
+	query := fmt.Sprintf("/api/leaderboard?limit=%d&mode=%s", limit, mode)
+	if *miners {
+		var scores []node.MinerScore
+		if err := apiGet(*api, query, &scores); err != nil {
+			fatalf("%v", err)
+		}
+		printMinerLeaderboard(scores)
+		return
+	}
+	var scores []node.WalletScore
+	if err := apiGet(*api, query, &scores); err != nil {
+		fatalf("%v", err)
+	}
+	if len(scores) == 0 {
+		fmt.Println("no funded wallets yet")
+		return
+	}
+	fmt.Printf("%-5s %-34s %s\n", "RANK", "WALLET", "BALANCE")
+	for i, score := range scores {
+		fmt.Printf("%-5d %-34s %s BLG\n", i+1, score.Address, chain.FormatAmount(score.Balance))
+	}
+}
+
+func printMinerLeaderboard(scores []node.MinerScore) {
+	if len(scores) == 0 {
+		fmt.Println("no mined blocks yet")
+		return
+	}
+	fmt.Printf("%-5s %-34s %-8s %s\n", "RANK", "MINER", "BLOCKS", "EARNED")
+	for i, score := range scores {
+		fmt.Printf("%-5d %-34s %-8d %s BLG\n", i+1, score.Address, score.Blocks, chain.FormatAmount(score.Earned))
 	}
 }
 
